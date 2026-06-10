@@ -115,10 +115,10 @@ pub fn full_build(
     }
     pb.finish_and_clear();
 
-    // Phase 3: post-process (spinner)
+    // Phase 3: post-process (spinner with elapsed time)
     let pb_post = ProgressBar::new_spinner();
     pb_post.set_style(
-        ProgressStyle::with_template("{spinner:.yellow} {msg}").unwrap(),
+        ProgressStyle::with_template("{spinner:.yellow} {msg}  {elapsed}").unwrap(),
     );
     pb_post.enable_steady_tick(Duration::from_millis(80));
     pb_post.set_message("Resolving call targets...");
@@ -213,7 +213,9 @@ pub fn incremental_update(
     store.store_file_batch(&results)?;
 
     let pb_post = ProgressBar::new_spinner();
-    pb_post.set_style(ProgressStyle::with_template("{spinner:.yellow} {msg}").unwrap());
+    pb_post.set_style(
+        ProgressStyle::with_template("{spinner:.yellow} {msg}  {elapsed}").unwrap(),
+    );
     pb_post.enable_steady_tick(Duration::from_millis(80));
     pb_post.set_message("Resolving call targets...");
     let resolved = store.resolve_bare_call_targets()?;
