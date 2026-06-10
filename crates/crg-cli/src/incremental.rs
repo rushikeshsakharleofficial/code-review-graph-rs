@@ -10,20 +10,23 @@ pub fn find_project_root() -> Option<PathBuf> {
     let home = std::env::var("HOME").ok().map(PathBuf::from);
     let mut current = start.clone();
     loop {
-        let has_marker = current.join(".git").exists()
-            || current.join(".code-review-graph").exists()
-            || current.join(".svn").exists();
-        if has_marker {
-            // Don't use $HOME as a root — it almost always means a dotfiles
-            // repo, not the directory the user wants to graph.
-            let is_home = home.as_deref().map(|h| h == current).unwrap_or(false);
-            if !is_home {
+        let is_home = home.as_deref().map(|h| h == current).unwrap_or(false);
+        if !is_home {
+            // .code-review-graph is our own marker — trust it at any depth.
+            // This handles "run from a subdir after first build".
+            if current.join(".code-review-graph").exists() {
+                return Some(current);
+            }
+            // .git / .svn: only trust at CWD itself, not parents.
+            // A parent .git is often a container repo (e.g. ~/Projects) or
+            // dotfiles, not the directory the user wants to graph.
+            if current == start
+                && (current.join(".git").exists() || current.join(".svn").exists())
+            {
                 return Some(current);
             }
         }
         if !current.pop() {
-            // No suitable marker found; default to the original CWD so the
-            // user's current directory is used rather than failing.
             return Some(start);
         }
     }
