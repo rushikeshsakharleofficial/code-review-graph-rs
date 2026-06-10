@@ -189,9 +189,12 @@ struct InstallArgs {
     /// Target platform: claude-code, cursor, windsurf, vscode, zed, continue, opencode.
     #[arg(long, default_value = "claude-code")]
     platform: String,
-    /// Repository root to embed in the config.
+    /// Repository root to embed in the config (defaults to detected project root).
     #[arg(long)]
     repo: Option<PathBuf>,
+    /// Print the config snippet instead of writing it to the config file.
+    #[arg(long)]
+    print: bool,
 }
 
 #[derive(Args)]
@@ -632,109 +635,170 @@ fn cmd_postprocess(args: PostprocessArgs) -> anyhow::Result<()> {
 // `install`
 // ---------------------------------------------------------------------------
 
+/// Read a JSON file, returning `{}` if the file doesn't exist or is empty.
+fn read_json_file(path: &std::path::Path) -> anyhow::Result<serde_json::Value> {
+    if !path.exists() {
+        return Ok(serde_json::Value::Object(serde_json::Map::new()));
+    }
+    let text = std::fs::read_to_string(path)?;
+    if text.trim().is_empty() {
+        return Ok(serde_json::Value::Object(serde_json::Map::new()));
+    }
+    Ok(serde_json::from_str(&text)?)
+}
+
+/// Write a JSON value to a file with pretty-printing.
+fn write_json_file(path: &std::path::Path, value: &serde_json::Value) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, serde_json::to_string_pretty(value)?)?;
+    Ok(())
+}
+
+/// Merge `entry` under `root["mcpServers"]["name"]`, creating keys as needed.
+fn merge_mcp_server(
+    mut root: serde_json::Value,
+    name: &str,
+    entry: serde_json::Value,
+) -> serde_json::Value {
+    let obj = root.as_object_mut().expect("root must be object");
+    let servers = obj
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    if let Some(map) = servers.as_object_mut() {
+        map.insert(name.to_string(), entry);
+    }
+    root
+}
+
 fn cmd_install(args: InstallArgs) -> anyhow::Result<()> {
     let exe_path = std::env::current_exe()
-        .unwrap_or_else(|_| PathBuf::from("code-review-graph"));
+        .unwrap_or_else(|_| PathBuf::from("/usr/bin/code-review-graph"));
 
+    // Auto-detect repo root if not specified.
     let repo_str = match args.repo {
         Some(ref p) => p
             .canonicalize()
             .map(|c| c.to_string_lossy().to_string())
             .unwrap_or_else(|_| p.to_string_lossy().to_string()),
-        None => "/path/to/your/repo".to_string(),
+        None => find_project_root()
+            .and_then(|p| p.canonicalize().ok())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| {
+                std::env::current_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| ".".to_string())
+            }),
     };
+
+    let exe_str = exe_path.to_string_lossy().to_string();
 
     match args.platform.as_str() {
         "claude-code" | "claude" => {
-            let config = serde_json::json!({
-                "mcpServers": {
-                    "code-review-graph": {
-                        "command": exe_path.to_string_lossy(),
-                        "args": ["serve"],
-                        "env": {
-                            "CRG_REPO": repo_str
-                        }
-                    }
-                }
+            let entry = serde_json::json!({
+                "command": exe_str,
+                "args": ["serve"],
+                "env": { "CRG_REPO": repo_str }
             });
-            println!("Add this to your Claude Code MCP config (~/.claude.json or .claude.json):");
-            println!("{}", serde_json::to_string_pretty(&config)?);
+
+            if args.print {
+                let snippet = serde_json::json!({ "mcpServers": { "code-review-graph": entry } });
+                println!("{}", serde_json::to_string_pretty(&snippet)?);
+                return Ok(());
+            }
+
+            // Prefer project-level .claude.json, fall back to ~/.claude.json.
+            let config_path = if PathBuf::from(".claude.json").exists() {
+                PathBuf::from(".claude.json")
+            } else {
+                dirs_home()?.join(".claude.json")
+            };
+
+            let existing = read_json_file(&config_path)?;
+            let updated = merge_mcp_server(existing, "code-review-graph", entry);
+            write_json_file(&config_path, &updated)?;
+            println!("✓ Added code-review-graph MCP server to {}", config_path.display());
+            println!("  repo: {}", repo_str);
+            println!("  Restart Claude Code to pick up the change.");
         }
         "cursor" => {
-            let config = serde_json::json!({
-                "mcpServers": {
-                    "code-review-graph": {
-                        "command": exe_path.to_string_lossy(),
-                        "args": ["serve", "--repo", repo_str]
-                    }
-                }
+            let entry = serde_json::json!({
+                "command": exe_str,
+                "args": ["serve", "--repo", repo_str]
             });
-            println!("Add this to your Cursor MCP config (~/.cursor/mcp.json):");
-            println!("{}", serde_json::to_string_pretty(&config)?);
+
+            if args.print {
+                let snippet = serde_json::json!({ "mcpServers": { "code-review-graph": entry } });
+                println!("{}", serde_json::to_string_pretty(&snippet)?);
+                return Ok(());
+            }
+
+            let config_path = dirs_home()?.join(".cursor").join("mcp.json");
+            let existing = read_json_file(&config_path)?;
+            let updated = merge_mcp_server(existing, "code-review-graph", entry);
+            write_json_file(&config_path, &updated)?;
+            println!("✓ Added to {}", config_path.display());
+            println!("  Restart Cursor to pick up the change.");
         }
         "windsurf" => {
-            let config = serde_json::json!({
-                "mcpServers": {
-                    "code-review-graph": {
-                        "command": exe_path.to_string_lossy(),
-                        "args": ["serve", "--repo", repo_str]
-                    }
-                }
+            let entry = serde_json::json!({
+                "command": exe_str,
+                "args": ["serve", "--repo", repo_str]
             });
-            println!("Add this to your Windsurf MCP config (~/.codeium/windsurf/mcp_config.json):");
-            println!("{}", serde_json::to_string_pretty(&config)?);
+
+            if args.print {
+                let snippet = serde_json::json!({ "mcpServers": { "code-review-graph": entry } });
+                println!("{}", serde_json::to_string_pretty(&snippet)?);
+                return Ok(());
+            }
+
+            let config_path = dirs_home()?
+                .join(".codeium")
+                .join("windsurf")
+                .join("mcp_config.json");
+            let existing = read_json_file(&config_path)?;
+            let updated = merge_mcp_server(existing, "code-review-graph", entry);
+            write_json_file(&config_path, &updated)?;
+            println!("✓ Added to {}", config_path.display());
         }
         "vscode" => {
+            // VS Code doesn't have a stable global MCP config path — just print.
             let config = serde_json::json!({
-                "mcp": {
-                    "servers": {
-                        "code-review-graph": {
-                            "type": "stdio",
-                            "command": exe_path.to_string_lossy(),
-                            "args": ["serve", "--repo", repo_str]
-                        }
-                    }
-                }
+                "mcp": { "servers": { "code-review-graph": {
+                    "type": "stdio",
+                    "command": exe_str,
+                    "args": ["serve", "--repo", repo_str]
+                }}}
             });
-            println!("Add this to your VS Code settings.json:");
+            println!("Add to your VS Code settings.json:");
             println!("{}", serde_json::to_string_pretty(&config)?);
         }
         "zed" => {
             let config = serde_json::json!({
-                "context_servers": {
-                    "code-review-graph": {
-                        "command": {
-                            "path": exe_path.to_string_lossy(),
-                            "args": ["serve", "--repo", repo_str]
-                        }
-                    }
-                }
+                "context_servers": { "code-review-graph": {
+                    "command": { "path": exe_str, "args": ["serve", "--repo", repo_str] }
+                }}
             });
-            println!("Add this to your Zed settings.json:");
+            println!("Add to your Zed settings.json:");
             println!("{}", serde_json::to_string_pretty(&config)?);
         }
         "continue" => {
             let config = serde_json::json!({
-                "mcpServers": [{
-                    "name": "code-review-graph",
-                    "command": exe_path.to_string_lossy(),
-                    "args": ["serve", "--repo", repo_str]
-                }]
+                "mcpServers": [{ "name": "code-review-graph", "command": exe_str,
+                    "args": ["serve", "--repo", repo_str] }]
             });
-            println!("Add this to your Continue config.json:");
+            println!("Add to your Continue config.json:");
             println!("{}", serde_json::to_string_pretty(&config)?);
         }
         "opencode" => {
             let config = serde_json::json!({
-                "mcp": {
-                    "code-review-graph": {
-                        "type": "local",
-                        "command": exe_path.to_string_lossy(),
-                        "args": ["serve", "--repo", repo_str]
-                    }
-                }
+                "mcp": { "code-review-graph": {
+                    "type": "local", "command": exe_str,
+                    "args": ["serve", "--repo", repo_str]
+                }}
             });
-            println!("Add this to your OpenCode config:");
+            println!("Add to your OpenCode config:");
             println!("{}", serde_json::to_string_pretty(&config)?);
         }
         other => {
@@ -748,6 +812,7 @@ fn cmd_install(args: InstallArgs) -> anyhow::Result<()> {
 
     Ok(())
 }
+
 
 // ---------------------------------------------------------------------------
 // `daemon`

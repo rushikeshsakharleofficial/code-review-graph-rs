@@ -69,6 +69,7 @@ tracing-subscriber = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 rayon = { workspace = true }
+indicatif = { version = "0.17", features = ["rayon"] }
 notify = { workspace = true }
 git2 = { workspace = true }
 regex = { workspace = true }

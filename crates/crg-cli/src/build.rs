@@ -1,5 +1,9 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
+use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
 use crg_core::store::GraphStore;
@@ -55,54 +59,92 @@ pub fn full_build(
     let start = std::time::Instant::now();
 
     if let Some(n) = opts.max_threads {
-        let _ = rayon::ThreadPoolBuilder::new()
-            .num_threads(n)
-            .build_global();
+        let _ = rayon::ThreadPoolBuilder::new().num_threads(n).build_global();
     }
 
+    // Phase 1: collect files (spinner)
+    let pb_scan = ProgressBar::new_spinner();
+    pb_scan.set_style(
+        ProgressStyle::with_template("{spinner:.cyan} {msg}").unwrap(),
+    );
+    pb_scan.enable_steady_tick(Duration::from_millis(80));
+    pb_scan.set_message("Scanning files...");
     let files = collect_files(repo_root)?;
+    pb_scan.finish_and_clear();
+
+    // Phase 2: parse (progress bar)
+    let total = files.len() as u64;
+    let pb = ProgressBar::new(total);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} Parsing  [{bar:40.cyan/blue}] {pos}/{len} files  ({percent}%)  eta {eta}",
+        )
+        .unwrap()
+        .progress_chars("█▉░"),
+    );
+    pb.enable_steady_tick(Duration::from_millis(80));
+
     let batch_size = 50;
-    let errors: Vec<String> = Vec::new();
+    let errors: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let mut parsed = 0usize;
     let mut skipped = 0usize;
 
     for chunk in files.chunks(batch_size) {
+        let errors_ref = Arc::clone(&errors);
+        let pb_ref = pb.clone();
         let results: Vec<Option<(String, Vec<crg_core::types::NodeInfo>, Vec<crg_core::types::EdgeInfo>, String)>> =
             chunk.par_iter().map(|file_path| {
-                let rel_path = file_path
-                    .strip_prefix(repo_root)
-                    .unwrap_or(file_path)
-                    .to_string_lossy()
-                    .to_string();
-
-                match crg_parser::parse_file(file_path) {
-                    Ok(result) => Some((rel_path, result.nodes, result.edges, result.file_hash)),
+                let rel = file_path.strip_prefix(repo_root).unwrap_or(file_path)
+                    .to_string_lossy().to_string();
+                let result = match crg_parser::parse_file(file_path) {
+                    Ok(r) => Some((rel, r.nodes, r.edges, r.file_hash)),
                     Err(e) => {
-                        tracing::warn!("Failed to parse {}: {}", rel_path, e);
+                        tracing::warn!("Failed to parse {}: {}", file_path.display(), e);
+                        errors_ref.fetch_add(1, Ordering::Relaxed);
                         None
                     }
-                }
+                };
+                pb_ref.inc(1);
+                result
             }).collect();
 
         let batch: Vec<_> = results.into_iter().flatten().collect();
         parsed += batch.len();
         skipped += chunk.len() - batch.len();
-
         store.store_file_batch(&batch)?;
     }
+    pb.finish_and_clear();
 
+    // Phase 3: post-process (spinner)
+    let pb_post = ProgressBar::new_spinner();
+    pb_post.set_style(
+        ProgressStyle::with_template("{spinner:.yellow} {msg}").unwrap(),
+    );
+    pb_post.enable_steady_tick(Duration::from_millis(80));
+    pb_post.set_message("Resolving call targets...");
     let resolved = store.resolve_bare_call_targets()?;
     tracing::info!("Resolved {} bare call targets", resolved);
 
     if opts.postprocess != "none" {
+        pb_post.set_message("Rebuilding FTS index...");
         run_postprocess(store)?;
     }
+    pb_post.finish_and_clear();
 
-    // Record last_updated timestamp.
     let now = chrono_now();
     store.set_metadata("last_updated", &now)?;
-
     let stats = store.get_stats()?;
+
+    let error_count = errors.load(Ordering::Relaxed);
+    let mut error_msgs = Vec::new();
+    if error_count > 0 {
+        error_msgs.push(format!("{} files failed to parse", error_count));
+    }
+
+    println!(
+        "✓ {} files parsed, {} skipped  |  {} nodes, {} edges  |  {:.1}s",
+        parsed, skipped, stats.total_nodes, stats.total_edges, start.elapsed().as_secs_f64()
+    );
 
     Ok(BuildResult {
         files_parsed: parsed,
@@ -110,7 +152,7 @@ pub fn full_build(
         nodes_total: stats.total_nodes,
         edges_total: stats.total_edges,
         duration_secs: start.elapsed().as_secs_f64(),
-        errors,
+        errors: error_msgs,
     })
 }
 
@@ -123,7 +165,7 @@ pub fn incremental_update(
     let changed = get_changed_files(repo_root, &opts.base)?;
 
     if changed.is_empty() {
-        tracing::info!("No changed files detected");
+        println!("✓ No changed files — graph is up to date");
         let stats = store.get_stats()?;
         return Ok(BuildResult {
             files_parsed: 0,
@@ -137,35 +179,60 @@ pub fn incremental_update(
 
     let start = std::time::Instant::now();
 
+    let pb = ProgressBar::new(changed.len() as u64);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{spinner:.green} Updating [{bar:40.cyan/blue}] {pos}/{len} files  ({percent}%)  eta {eta}",
+        )
+        .unwrap()
+        .progress_chars("█▉░"),
+    );
+    pb.enable_steady_tick(Duration::from_millis(80));
+
     let results: Vec<(String, Vec<crg_core::types::NodeInfo>, Vec<crg_core::types::EdgeInfo>, String)> =
         changed.par_iter().filter_map(|rel_path| {
             let abs_path = repo_root.join(rel_path);
-            if !abs_path.exists() {
-                // Deleted file — pass empty vecs; store_file_batch will remove data.
-                return Some((rel_path.clone(), vec![], vec![], String::new()));
-            }
-            match crg_parser::parse_file(&abs_path) {
-                Ok(result) => Some((rel_path.clone(), result.nodes, result.edges, result.file_hash)),
-                Err(e) => {
-                    tracing::warn!("Failed to parse {}: {}", rel_path, e);
-                    None
+            let result = if !abs_path.exists() {
+                Some((rel_path.clone(), vec![], vec![], String::new()))
+            } else {
+                match crg_parser::parse_file(&abs_path) {
+                    Ok(r) => Some((rel_path.clone(), r.nodes, r.edges, r.file_hash)),
+                    Err(e) => {
+                        tracing::warn!("Failed to parse {}: {}", rel_path, e);
+                        None
+                    }
                 }
-            }
+            };
+            pb.inc(1);
+            result
         }).collect();
+
+    pb.finish_and_clear();
 
     let count = results.len();
     store.store_file_batch(&results)?;
+
+    let pb_post = ProgressBar::new_spinner();
+    pb_post.set_style(ProgressStyle::with_template("{spinner:.yellow} {msg}").unwrap());
+    pb_post.enable_steady_tick(Duration::from_millis(80));
+    pb_post.set_message("Resolving call targets...");
     let resolved = store.resolve_bare_call_targets()?;
     tracing::info!("Resolved {} bare call targets", resolved);
 
     if opts.postprocess != "none" {
+        pb_post.set_message("Rebuilding FTS index...");
         run_postprocess(store)?;
     }
+    pb_post.finish_and_clear();
 
     let now = chrono_now();
     store.set_metadata("last_updated", &now)?;
-
     let stats = store.get_stats()?;
+
+    println!(
+        "✓ {} files updated  |  {} nodes, {} edges  |  {:.1}s",
+        count, stats.total_nodes, stats.total_edges, start.elapsed().as_secs_f64()
+    );
 
     Ok(BuildResult {
         files_parsed: count,
