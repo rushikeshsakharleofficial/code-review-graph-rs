@@ -6,7 +6,7 @@ use tracing_subscriber::EnvFilter;
 
 use crg_cli::{
     build::{full_build, incremental_update, BuildOptions},
-    incremental::{ensure_schema_dir, find_project_root, get_db_path},
+    incremental::{ensure_schema_dir, get_db_path},
 };
 use crg_core::store::GraphStore;
 
@@ -252,11 +252,9 @@ async fn main() -> anyhow::Result<()> {
 // Helpers shared across subcommands
 // ---------------------------------------------------------------------------
 
-/// Resolve the repo root from an explicit `--repo` flag or by walking upward
-/// from the current directory.
+/// Resolve the repo root from an explicit path/flag, or default to CWD.
 fn resolve_repo_root(repo: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     let root = repo
-        .or_else(find_project_root)
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let root = root.canonicalize().with_context(|| {
         format!("Could not canonicalize repo path: {}", root.display())
@@ -676,20 +674,18 @@ fn cmd_install(args: InstallArgs) -> anyhow::Result<()> {
     let exe_path = std::env::current_exe()
         .unwrap_or_else(|_| PathBuf::from("/usr/bin/code-review-graph"));
 
-    // Auto-detect repo root if not specified.
+    // Use explicit --repo, or CWD. Never walk up — install is always run
+    // from inside the project directory the user wants to configure.
     let repo_str = match args.repo {
         Some(ref p) => p
             .canonicalize()
             .map(|c| c.to_string_lossy().to_string())
             .unwrap_or_else(|_| p.to_string_lossy().to_string()),
-        None => find_project_root()
+        None => std::env::current_dir()
+            .ok()
             .and_then(|p| p.canonicalize().ok())
             .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| {
-                std::env::current_dir()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| ".".to_string())
-            }),
+            .unwrap_or_else(|| ".".to_string()),
     };
 
     let exe_str = exe_path.to_string_lossy().to_string();
