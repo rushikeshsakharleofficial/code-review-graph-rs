@@ -1,0 +1,6 @@
+/target/
+.code-review-graph/
+*.db
+*.db-shm
+*.db-wal
+Cargo.lock.bak
