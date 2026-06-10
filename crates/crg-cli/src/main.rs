@@ -67,6 +67,9 @@ enum Commands {
 
 #[derive(Args)]
 struct BuildArgs {
+    /// Repository root path (positional shorthand: `build .` or `build /path/to/repo`).
+    #[arg(value_name = "PATH", num_args = 0..=1)]
+    path: Option<PathBuf>,
     /// Force a full rebuild (re-parses all files; existing stale data is overwritten on conflict).
     #[arg(long)]
     full: bool,
@@ -249,16 +252,15 @@ async fn main() -> anyhow::Result<()> {
 /// Resolve the repo root from an explicit `--repo` flag or by walking upward
 /// from the current directory.
 fn resolve_repo_root(repo: Option<PathBuf>) -> anyhow::Result<PathBuf> {
-    let root = match repo {
-        Some(p) => p,
-        None => find_project_root().context(
-            "Could not find a project root (no .git or .code-review-graph directory). \
-             Use --repo to specify one.",
-        )?,
-    };
+    let root = repo
+        .or_else(find_project_root)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let root = root.canonicalize().with_context(|| {
         format!("Could not canonicalize repo path: {}", root.display())
     })?;
+    // Create .code-review-graph/ before validation so any directory is
+    // accepted, not just pre-existing git/svn repos.
+    ensure_schema_dir(&root)?;
     crg_core::security::validate_repo_root(&root)?;
     Ok(root)
 }
@@ -276,7 +278,7 @@ fn open_store(repo_root: &std::path::Path) -> anyhow::Result<GraphStore> {
 // ---------------------------------------------------------------------------
 
 fn cmd_build(args: BuildArgs) -> anyhow::Result<()> {
-    let repo_root = resolve_repo_root(args.repo)?;
+    let repo_root = resolve_repo_root(args.path.or(args.repo))?;
     let store = open_store(&repo_root)?;
 
     let opts = BuildOptions {

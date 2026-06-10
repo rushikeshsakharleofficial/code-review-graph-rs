@@ -3,18 +3,28 @@ use std::path::{Path, PathBuf};
 /// Walk upward from the current directory looking for a project root marker.
 ///
 /// Recognises `.git`, `.svn`, and `.code-review-graph` directories.
-/// Returns `None` if no marker is found before the filesystem root.
+/// Skips `$HOME` as a root (home-dir dotfiles repos should not be used as a
+/// code-review-graph target).  Falls back to CWD if no marker is found.
 pub fn find_project_root() -> Option<PathBuf> {
-    let mut current = std::env::current_dir().ok()?;
+    let start = std::env::current_dir().ok()?;
+    let home = std::env::var("HOME").ok().map(PathBuf::from);
+    let mut current = start.clone();
     loop {
-        if current.join(".git").exists()
+        let has_marker = current.join(".git").exists()
             || current.join(".code-review-graph").exists()
-            || current.join(".svn").exists()
-        {
-            return Some(current);
+            || current.join(".svn").exists();
+        if has_marker {
+            // Don't use $HOME as a root — it almost always means a dotfiles
+            // repo, not the directory the user wants to graph.
+            let is_home = home.as_deref().map(|h| h == current).unwrap_or(false);
+            if !is_home {
+                return Some(current);
+            }
         }
         if !current.pop() {
-            return None;
+            // No suitable marker found; default to the original CWD so the
+            // user's current directory is used rather than failing.
+            return Some(start);
         }
     }
 }
