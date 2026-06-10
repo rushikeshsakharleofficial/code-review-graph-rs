@@ -2,6 +2,52 @@
 name = "crg-cli"
 version.workspace = true
 edition.workspace = true
+description = "Persistent, incrementally updated knowledge graph for token-efficient code review"
+license = "MIT"
+homepage = "https://github.com/code-review-graph/code-review-graph"
+repository = "https://github.com/code-review-graph/code-review-graph"
+
+[package.metadata.deb]
+name = "code-review-graph"
+maintainer = "code-review-graph contributors <code-review-graph@example.com>"
+copyright = "2024 code-review-graph contributors"
+license-file = ["../../LICENSE", "4"]
+extended-description = """\
+Persistent, incrementally updated, local-first knowledge graph for token-efficient
+code review through MCP and the CLI. Parses codebases with tree-sitter, stores a
+structural graph in SQLite, and exposes compact context to AI coding tools."""
+depends = "$auto, python3 (>= 3.10)"
+recommends = "python3-pip"
+section = "devel"
+priority = "optional"
+assets = [
+    ["../../target/release/code-review-graph", "usr/bin/code-review-graph", "755"],
+    ["../../target/release/crg-mcp",           "usr/bin/crg-mcp",           "755"],
+    ["../../packaging/code-review-graph.service", "lib/systemd/system/code-review-graph.service", "644"],
+]
+conf-files = []
+
+[package.metadata.generate-rpm]
+name = "code-review-graph"
+license = "MIT"
+description = "Persistent, incrementally updated knowledge graph for token-efficient code review"
+summary = "Knowledge graph for token-efficient code review (MCP + CLI)"
+requires = { python3 = ">= 3.10" }
+
+[[package.metadata.generate-rpm.assets]]
+source = "../../target/release/code-review-graph"
+dest = "/usr/bin/code-review-graph"
+mode = "0755"
+
+[[package.metadata.generate-rpm.assets]]
+source = "../../target/release/crg-mcp"
+dest = "/usr/bin/crg-mcp"
+mode = "0755"
+
+[[package.metadata.generate-rpm.assets]]
+source = "../../packaging/code-review-graph.service"
+dest = "/lib/systemd/system/code-review-graph.service"
+mode = "0644"
 
 [[bin]]
 name = "code-review-graph"

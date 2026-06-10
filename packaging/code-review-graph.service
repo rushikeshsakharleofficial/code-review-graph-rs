@@ -1,0 +1,16 @@
+[Unit]
+Description=code-review-graph background file-watching daemon
+Documentation=https://github.com/code-review-graph/code-review-graph
+After=local-fs.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/code-review-graph daemon --daemon-foreground
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=code-review-graph
+
+[Install]
+WantedBy=multi-user.target
