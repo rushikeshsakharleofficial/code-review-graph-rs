@@ -11,20 +11,8 @@ pub fn find_project_root() -> Option<PathBuf> {
     let mut current = start.clone();
     loop {
         let is_home = home.as_deref().map(|h| h == current).unwrap_or(false);
-        if !is_home {
-            // .code-review-graph is our own marker — trust it at any depth.
-            // This handles "run from a subdir after first build".
-            if current.join(".code-review-graph").exists() {
-                return Some(current);
-            }
-            // .git / .svn: only trust at CWD itself, not parents.
-            // A parent .git is often a container repo (e.g. ~/Projects) or
-            // dotfiles, not the directory the user wants to graph.
-            if current == start
-                && (current.join(".git").exists() || current.join(".svn").exists())
-            {
-                return Some(current);
-            }
+        if !is_home && current.join(".code-review-graph").exists() {
+            return Some(current);
         }
         if !current.pop() {
             return Some(start);

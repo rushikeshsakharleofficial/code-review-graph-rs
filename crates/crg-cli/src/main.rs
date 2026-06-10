@@ -708,12 +708,9 @@ fn cmd_install(args: InstallArgs) -> anyhow::Result<()> {
                 return Ok(());
             }
 
-            // Prefer project-level .claude.json, fall back to ~/.claude.json.
-            let config_path = if PathBuf::from(".claude.json").exists() {
-                PathBuf::from(".claude.json")
-            } else {
-                dirs_home()?.join(".claude.json")
-            };
+            // Write to project-level .claude.json so config is scoped to this
+            // repo and doesn't affect other projects.
+            let config_path = PathBuf::from(&repo_str).join(".claude.json");
 
             let existing = read_json_file(&config_path)?;
             let updated = merge_mcp_server(existing, "code-review-graph", entry);
