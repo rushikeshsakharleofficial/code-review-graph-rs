@@ -1,0 +1,10 @@
+[package]
+name = "crg-wiki"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+crg-core = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

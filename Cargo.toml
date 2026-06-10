@@ -1,0 +1,100 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/crg-core",
+    "crates/crg-parser",
+    "crates/crg-search",
+    "crates/crg-flows",
+    "crates/crg-changes",
+    "crates/crg-communities",
+    "crates/crg-embeddings",
+    "crates/crg-analysis",
+    "crates/crg-refactor",
+    "crates/crg-visualization",
+    "crates/crg-wiki",
+    "crates/crg-mcp",
+    "crates/crg-cli",
+    "crates/crg-sidecar-bridge",
+]
+
+[workspace.package]
+version = "2.3.5"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+authors = ["code-review-graph contributors"]
+
+[workspace.dependencies]
+# Core async runtime
+tokio = { version = "1", features = ["full"] }
+
+# SQLite
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+# Tree-sitter parsing
+# tree-sitter-language-pack v1.8 requires tree-sitter ^0.26
+tree-sitter = "0.26"
+tree-sitter-language-pack = "1.8"
+
+# MCP server
+rmcp = { version = "1.7", features = ["server", "macros"] }
+schemars = "0.8"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Git integration
+git2 = { version = "0.20", default-features = false }
+
+# Parallel processing
+rayon = "1"
+
+# File watching
+notify = "7"
+
+# HTTP client (embeddings REST providers)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Hashing
+sha2 = "0.10"
+hex = "0.4"
+
+# Base64 (for API payloads)
+base64 = "0.22"
+
+# Regex
+regex = "1"
+
+# Random (for seeding)
+rand = "0.8"
+
+# Workspace-internal crates
+crg-core = { path = "crates/crg-core" }
+crg-parser = { path = "crates/crg-parser" }
+crg-search = { path = "crates/crg-search" }
+crg-flows = { path = "crates/crg-flows" }
+crg-changes = { path = "crates/crg-changes" }
+crg-communities = { path = "crates/crg-communities" }
+crg-embeddings = { path = "crates/crg-embeddings" }
+crg-analysis = { path = "crates/crg-analysis" }
+crg-refactor = { path = "crates/crg-refactor" }
+crg-visualization = { path = "crates/crg-visualization" }
+crg-wiki = { path = "crates/crg-wiki" }
+crg-sidecar-bridge = { path = "crates/crg-sidecar-bridge" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3

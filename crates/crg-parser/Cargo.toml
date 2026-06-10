@@ -1,0 +1,18 @@
+[package]
+name = "crg-parser"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+crg-core = { workspace = true }
+tree-sitter = { workspace = true }
+tree-sitter-language-pack = { workspace = true }
+rayon = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+regex = { workspace = true }

@@ -1,0 +1,4 @@
+cargo:rerun-if-env-changed=TSLP_LANGUAGES
+cargo:rerun-if-env-changed=PROJECT_ROOT
+cargo:rerun-if-env-changed=TSLP_LINK_MODE
+cargo:rerun-if-changed=/home/rushikesh.sakharle/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/tree-sitter-language-pack-1.8.1/language_definitions.json
