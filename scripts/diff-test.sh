@@ -71,31 +71,35 @@ PYEOF
     echo "Using built-in fixture at $FIXTURE_DIR"
 fi
 
+# Ensure the fixture has a .git dir (needed by validate_repo_root in the Rust CLI)
+if [[ ! -d "$FIXTURE_DIR/.git" && ! -d "$FIXTURE_DIR/.code-review-graph" ]]; then
+    git -C "$FIXTURE_DIR" init -q 2>/dev/null || true
+fi
+
 echo "Fixture: $FIXTURE_DIR"
 
 # ── 2. Python build ───────────────────────────────────────────────────────────
 
 PY_DB="$PY_OUT/graph.db"
 echo "[python] Building graph..."
-(
-    cd "$FIXTURE_DIR"
-    # Build using the Python CLI
-    CRG_DB_PATH="$PY_DB" \
-    uv --directory "$PYTHON_CRG_DIR" run code-review-graph build \
-        --no-postprocess 2>/dev/null || \
-    python3 -m code_review_graph.cli build --repo "$FIXTURE_DIR" 2>/dev/null || {
-        # Fallback: direct API call
-        python3 -c "
-import sys; sys.path.insert(0, '$PYTHON_CRG_DIR')
-from code_review_graph.incremental import build_graph
+python3 -c "
+import sys, os
+from pathlib import Path
+sys.path.insert(0, '$PYTHON_CRG_DIR')
+from code_review_graph.incremental import full_build
 from code_review_graph.graph import GraphStore
-import os
-os.environ['CRG_DB_PATH'] = '$PY_DB'
-build_graph('$FIXTURE_DIR', full_rebuild=True, postprocess='none')
-print('Python build complete')
-"
-    }
-)
+store = GraphStore('$PY_DB')
+try:
+    full_build(Path('$FIXTURE_DIR'), store)
+    print('Python build: OK')
+except Exception as e:
+    print(f'Python build failed: {e}', file=sys.stderr)
+    try: store.close()
+    except: pass
+    sys.exit(2)
+try: store.close()
+except: pass
+" 2>&1
 echo "[python] Done"
 
 # ── 3. Rust build ─────────────────────────────────────────────────────────────
@@ -129,20 +133,26 @@ fi
 
 export_nodes() {
     local db="$1" out="$2"
-    sqlite3 "$db" \
-        "SELECT kind, name, qualified_name, file_path, line_start, line_end, language
-         FROM nodes WHERE kind != 'File'
-         ORDER BY qualified_name ASC" \
-        | tr '|' '\t' > "$out/nodes.tsv"
+    python3 -c "
+import sqlite3, sys
+conn = sqlite3.connect('$db')
+rows = conn.execute(\"SELECT kind, name, qualified_name, file_path, line_start, line_end, language FROM nodes WHERE kind != 'File' ORDER BY qualified_name ASC\").fetchall()
+conn.close()
+for r in rows:
+    print('\t'.join('' if v is None else str(v) for v in r))
+" > "$out/nodes.tsv"
 }
 
 export_edges() {
     local db="$1" out="$2"
-    sqlite3 "$db" \
-        "SELECT kind, source_qualified, target_qualified
-         FROM edges
-         ORDER BY kind ASC, source_qualified ASC, target_qualified ASC" \
-        | tr '|' '\t' > "$out/edges.tsv"
+    python3 -c "
+import sqlite3, sys
+conn = sqlite3.connect('$db')
+rows = conn.execute('SELECT kind, source_qualified, target_qualified FROM edges ORDER BY kind ASC, source_qualified ASC, target_qualified ASC').fetchall()
+conn.close()
+for r in rows:
+    print('\t'.join('' if v is None else str(v) for v in r))
+" > "$out/edges.tsv"
 }
 
 if [[ -f "$PY_DB" ]]; then
@@ -179,8 +189,8 @@ echo "  Python: $PY_NODES nodes, $PY_EDGES edges"
 echo "  Rust:   $RS_NODES nodes, $RS_EDGES edges"
 echo "═══════════════════════════════════════"
 
-NODE_DIFF=$(diff "$PY_OUT/nodes.tsv" "$RS_OUT/nodes.tsv" | wc -l)
-EDGE_DIFF=$(diff "$PY_OUT/edges.tsv" "$RS_OUT/edges.tsv" | wc -l)
+NODE_DIFF=$({ diff "$PY_OUT/nodes.tsv" "$RS_OUT/nodes.tsv" || true; } | wc -l)
+EDGE_DIFF=$({ diff "$PY_OUT/edges.tsv" "$RS_OUT/edges.tsv" || true; } | wc -l)
 
 if [[ "$NODE_DIFF" -eq 0 && "$EDGE_DIFF" -eq 0 ]]; then
     echo "✓ PASS: Graphs are identical"

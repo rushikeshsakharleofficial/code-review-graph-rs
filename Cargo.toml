@@ -37,8 +37,8 @@ tree-sitter = "0.26"
 tree-sitter-language-pack = "1.8"
 
 # MCP server
-rmcp = { version = "1.7", features = ["server", "macros"] }
-schemars = "0.8"
+rmcp = { version = "1.7", features = ["server", "macros", "transport-io"] }
+schemars = "1"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

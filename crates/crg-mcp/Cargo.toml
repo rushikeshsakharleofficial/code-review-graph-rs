@@ -3,8 +3,22 @@ name = "crg-mcp"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "crg-mcp"
+path = "src/main.rs"
+
+[lib]
+name = "crg_mcp"
+path = "src/lib.rs"
+
 [dependencies]
 crg-core = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+rmcp = { workspace = true }

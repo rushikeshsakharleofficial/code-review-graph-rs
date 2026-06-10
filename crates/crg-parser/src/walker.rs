@@ -128,6 +128,22 @@ fn parse_bytes_with_lang(
         debug!("no tree-sitter grammar for lang={lang_name}, file={file_path}");
     }
 
+    // Emit CONTAINS edges from the File node to every top-level symbol (no parent).
+    let top_level_qns: Vec<String> = result.nodes.iter()
+        .filter(|n| n.kind != "File" && n.parent_name.is_none())
+        .map(|n| format!("{}::{}", file_path, n.name))
+        .collect();
+    for target_qn in top_level_qns {
+        result.edges.push(EdgeInfo {
+            kind: "CONTAINS".to_string(),
+            source: file_path.to_string(),
+            target: target_qn,
+            file_path: file_path.to_string(),
+            line: 1,
+            ..Default::default()
+        });
+    }
+
     Ok(result)
 }
 
@@ -945,7 +961,11 @@ mod tests {
         assert_eq!(funcs[0].parent_name.as_deref(), Some("MyClass"));
 
         let contains_edges: Vec<_> = result.edges.iter().filter(|e| e.kind == "CONTAINS").collect();
-        assert_eq!(contains_edges.len(), 1);
+        // file→MyClass + MyClass→method
+        assert_eq!(contains_edges.len(), 2);
+        let sources: Vec<_> = contains_edges.iter().map(|e| e.source.as_str()).collect();
+        assert!(sources.contains(&"test.py"), "file→class edge missing");
+        assert!(sources.iter().any(|s| s.contains("MyClass")), "class→method edge missing");
     }
 
     #[test]

@@ -1110,11 +1110,118 @@ impl GraphStore {
         Ok(result)
     }
 
+    /// Run an FTS5 BM25 search against the `nodes_fts` table.
+    ///
+    /// Returns `(node_rowid, bm25_score)` tuples where a higher score is better.
+    /// FTS5's `rank` value is negative BM25; we negate it for consistent ordering.
+    /// Wraps the user query in double-quotes to prevent FTS5 operator injection.
+    /// Returns an empty Vec (never errors) so callers can fall through to the
+    /// keyword LIKE fallback.
+    pub fn fts_search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<(i64, f64)>> {
+        let conn = self.conn.lock().expect("GraphStore mutex poisoned");
+        // Escape inner double-quotes then wrap in outer double-quotes.
+        let safe_query = format!(r#""{}""#, query.replace('"', r#""""#));
+        let mut stmt = conn.prepare(
+            "SELECT rowid, rank FROM nodes_fts WHERE nodes_fts MATCH ? ORDER BY rank LIMIT ?",
+        )?;
+        let results: Vec<(i64, f64)> = stmt
+            .query_map(rusqlite::params![safe_query, limit as i64], |r| {
+                let rowid: i64 = r.get(0)?;
+                let rank: f64 = r.get(1)?;
+                // Negate: FTS5 returns negative BM25 (lower = better), we want higher = better.
+                Ok((rowid, -rank))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(results)
+    }
+
+    /// Fall back to LIKE keyword matching when FTS5 is unavailable or empty.
+    ///
+    /// Each whitespace-delimited word must match independently (AND logic).
+    /// Returns `(node_id, score)` tuples with a basic 3/2/1 relevance score
+    /// (exact name match > prefix > contains), sorted descending.
+    pub fn keyword_search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<(i64, f64)>> {
+        let words: Vec<&str> = query.split_whitespace().collect();
+        if words.is_empty() {
+            return Ok(vec![]);
+        }
+        let conn = self.conn.lock().expect("GraphStore mutex poisoned");
+
+        // Build WHERE clause: one AND-ed condition per word.
+        let conditions: Vec<String> = words
+            .iter()
+            .map(|_| "(LOWER(name) LIKE ? OR LOWER(qualified_name) LIKE ?)".to_string())
+            .collect();
+        let where_clause = conditions.join(" AND ");
+        let sql = format!("SELECT id, name FROM nodes WHERE {where_clause} LIMIT ?");
+
+        // Bind params: two patterns per word, then the limit.
+        let mut params_vec: Vec<rusqlite::types::Value> = Vec::new();
+        for word in &words {
+            let pattern = format!("%{}%", word.to_lowercase());
+            params_vec.push(rusqlite::types::Value::Text(pattern.clone()));
+            params_vec.push(rusqlite::types::Value::Text(pattern));
+        }
+        params_vec.push(rusqlite::types::Value::Integer(limit as i64));
+
+        let mut stmt = conn.prepare(&sql)?;
+        let q_lower = query.to_lowercase();
+        let mut results: Vec<(i64, f64)> = stmt
+            .query_map(rusqlite::params_from_iter(params_vec.iter()), |r| {
+                let id: i64 = r.get(0)?;
+                let name: String = r.get(1)?;
+                Ok((id, name))
+            })?
+            .filter_map(|r| r.ok())
+            .map(|(id, name)| {
+                let name_lower = name.to_lowercase();
+                let score = if name_lower == q_lower {
+                    3.0_f64
+                } else if name_lower.starts_with(&q_lower) {
+                    2.0_f64
+                } else {
+                    1.0_f64
+                };
+                (id, score)
+            })
+            .collect();
+
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(results)
+    }
+
+    /// Batch-fetch nodes by a slice of database row IDs.
+    ///
+    /// IDs that do not exist in the database are silently skipped.  Results are
+    /// returned in DB-scan order (not ID order) — callers must re-sort if needed.
+    pub fn get_nodes_by_ids(&self, ids: &[i64]) -> anyhow::Result<Vec<GraphNode>> {
+        use crate::constants::BATCH_SIZE;
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let conn = self.conn.lock().expect("GraphStore mutex poisoned");
+        let mut result = Vec::new();
+        for chunk in ids.chunks(BATCH_SIZE) {
+            let placeholders = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let sql = format!("SELECT * FROM nodes WHERE id IN ({placeholders})");
+            let mut stmt = conn.prepare(&sql)?;
+            let params: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|id| id as &dyn rusqlite::ToSql).collect();
+            let nodes: Vec<GraphNode> = stmt
+                .query_map(params.as_slice(), row_to_node)?
+                .filter_map(|r| r.ok())
+                .collect();
+            result.extend(nodes);
+        }
+        Ok(result)
+    }
+
     pub fn resolve_bare_call_targets(&self) -> anyhow::Result<i64> {
         // Build a name -> qualified_name index for Functions/Methods
         let conn = self.conn.lock().unwrap();
         let mut name_to_qn: HashMap<String, Vec<String>> = HashMap::new();
-        let mut stmt = conn.prepare("SELECT name, qualified_name FROM nodes WHERE kind IN ('Function', 'Test')")?;
+        let mut stmt = conn.prepare("SELECT name, qualified_name FROM nodes WHERE kind IN ('Function', 'Method', 'Class', 'Test')")?;
         let rows: Vec<(String, String)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .filter_map(|r| r.ok()).collect();
         for (name, qn) in rows {
@@ -1138,6 +1245,71 @@ impl GraphStore {
             }
         }
         Ok(resolved)
+    }
+
+    /// Rename a symbol in the graph: update its node record and all edges that
+    /// reference it as source or target.
+    ///
+    /// `old_qualified` is the existing `qualified_name`.
+    /// `new_name` is the plain (unqualified) name part; the new qualified name is
+    /// computed by replacing the trailing `::name` or `::Parent.name` segment.
+    ///
+    /// Returns `(updated_nodes, updated_edges)` counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the node does not exist or any SQL update fails.
+    pub fn apply_rename(
+        &self,
+        old_qualified: &str,
+        new_name: &str,
+    ) -> anyhow::Result<(usize, usize)> {
+        let conn = self.conn.lock().expect("GraphStore mutex poisoned");
+
+        // Fetch the current node to get its parent_name and file_path.
+        let (file_path, parent_name): (String, Option<String>) = conn
+            .query_row(
+                "SELECT file_path, parent_name FROM nodes WHERE qualified_name = ?1",
+                rusqlite::params![old_qualified],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|_| anyhow::anyhow!("Node not found: {}", old_qualified))?;
+
+        // Compute the new qualified name.
+        let new_qualified = crate::types::make_qualified(
+            "Function", // kind is irrelevant for qualified name logic — File is the special case
+            new_name,
+            &file_path,
+            parent_name.as_deref(),
+        );
+
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let result: anyhow::Result<(usize, usize)> = (|| {
+            let updated_nodes = conn.execute(
+                "UPDATE nodes SET name = ?1, qualified_name = ?2 WHERE qualified_name = ?3",
+                rusqlite::params![new_name, new_qualified, old_qualified],
+            )?;
+            let src_updated = conn.execute(
+                "UPDATE edges SET source_qualified = ?1 WHERE source_qualified = ?2",
+                rusqlite::params![new_qualified, old_qualified],
+            )?;
+            let tgt_updated = conn.execute(
+                "UPDATE edges SET target_qualified = ?1 WHERE target_qualified = ?2",
+                rusqlite::params![new_qualified, old_qualified],
+            )?;
+            Ok((updated_nodes, src_updated + tgt_updated))
+        })();
+
+        match result {
+            Ok(counts) => {
+                conn.execute_batch("COMMIT")?;
+                Ok(counts)
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        }
     }
 }
 
